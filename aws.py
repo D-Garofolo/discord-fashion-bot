@@ -20,18 +20,17 @@ def addDesigner(name, collections):
   )
 
 #Add images of a specific runway to the backend, use of expression to avoid a hefty write cost
-def addRunway(name, index, outfits):
+def updateRunway(name, index, newRunway):
   response = table.update_item(
     Key={
       'DesignerName': name
     },
-    UpdateExpression = "SET #cl[" + str(index) + "].#of = :outfits",
+    UpdateExpression = "SET #cl[" + str(index) + "] = :nr",
     ExpressionAttributeNames={
       "#cl": "Collections",
-      "#of": "Outfits"
     },
     ExpressionAttributeValues={
-      ":outfits": outfits
+      ":nr": newRunway
     }
   )
 

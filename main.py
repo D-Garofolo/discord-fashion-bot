@@ -1,6 +1,6 @@
 import discord
 import requests
-from aws import getDesigner, addDesigner, getRunway, addRunway
+from aws import getDesigner, addDesigner, getRunway, updateRunway
 from bs4 import BeautifulSoup
 import os
 import math
@@ -11,10 +11,11 @@ client = discord.Client()
 #Public array used for runway fetching and indices matching
 emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"] 
 skip_button = "⏭️"
+vote_emojis = ["👍", "👎"]
 
-#Runway command, finds all collections on Vogue from a given designer, then allow user to specify which runway they want via reactions
 @client.event
 async def on_message(message):
+  #Runway command, finds all collections on Vogue from a given designer, then allow user to specify which runway they want via reactions
   if message.content.startswith('$runway'):
     args = message.content.lower().split()[1:]
     designer_name = ' '.join(args)
@@ -52,7 +53,8 @@ async def on_message(message):
           elem = {
             "Collection Title" : title,
             "URL" : show_url,
-            "Outfits" : []
+            "Score" : 0,
+            "TotalVotes" : 0
           }
           res.append(elem)
 
@@ -82,51 +84,77 @@ async def on_message(message):
       await temp.add_reaction(emoji)
     await temp.add_reaction(skip_button)
 
+  #Topcollections command, gathers information on runway and displays the top 5 most highly rated collections based on previous user input
+  if message.content.startswith('$topcollections'):
+    #Fetch information from backend, if designer isn't cached or exists, return error message.
+    args = message.content.lower().split()[1:]
+    designer_name = ' '.join(args)
+    table = getDesigner(designer_name)
+    if (not 'Item' in table):
+      await message.channel.send("No information on this designer found. Correct usage is *$topcollections <designer name>*.")
+      return
 
-#Reaction based prompts, allows traversal of designer's page via the skip button, and displaying of a selected runway using the index buttons
+    #Iterate through table, if there are no votes, don't add them to the array to be sorted (prevents divide by zero error later down the line)
+    ans = []
+    for collection in table['Item']['Collections']:
+      if (collection['TotalVotes'] > 0):
+        ans.append(collection)
+
+    #Comparator necessary for sorting since sorting condition depends on 2 variables
+    def comparator(x):
+      return -(x['Score']/x['TotalVotes'])
+
+    ans = sorted(ans, key=comparator)
+
+    #Use sorted array to display a message with the top 5 rated collections
+    ranking_message_txt = ""
+    for i in range(min(5, len(ans))):
+      ranking_message_txt += ans[i]['Collection Title'] + " : " + str(round(ans[i]['Score'] / ans[i]['TotalVotes'] * 100)) + "% approval rating (" + str(ans[i]['TotalVotes']) + " ratings overall)\n"
+
+    ranking_message_title = "Top 5 " + designer_name + " collections"
+    
+    embed = discord.Embed(title=ranking_message_title, description=ranking_message_txt)
+    await message.channel.send(embed=embed)
+    
 @client.event
 async def on_reaction_add(reaction, user):
+  #Action relating to pressing one of the buttons to display a runway, fetch all images of a given collection
   if not user.bot and reaction.emoji in emojis:
     #Must grab page number from footer to determine what page we're on and what index to grab
     embed = reaction.message.embeds[0]
     page_number = int(embed.footer.text.split()[1])
     index = (page_number - 1) * 10 + emojis.index(reaction.emoji)
 
-    #Call backend to see if runway urls are stored in database, if not
     table = getRunway(reaction.message.embeds[0].title, index)
-    if (len(table['Outfits']) == 0):
-      runway_url = table['URL'] + "/slideshow/collection"
-      response = requests.get(runway_url)
-      soup = BeautifulSoup(response.content, "html.parser")
-  
-      #Gather data where all image urls in the collection are held and convert into json
-      results = soup.findAll("script", type="text/javascript", text=True)
-      parse = results[1].string
-      start = parse.index("runwayGalleries")
-      end = parse.index("isMobileDevice")
-  
-      #Making usable json from parsed data to easily fetch each image url
-      parse = "{" + parse[start - 1:end - 2] + "}"
-      ans = json.loads(parse)
-      ans = ans["runwayGalleries"]["galleries"][0]["items"]
-
-      urls = []
-      
-      for n in ans:
-        urls.append(n["image"]["sources"]["xxl"]["url"])
-
-      #Add it to backend and then re-retrieve it in the format stored in the backend for a singular method of displaying data regardless of initial condition
-      addRunway(reaction.message.embeds[0].title, index, urls)
-      table = getRunway(reaction.message.embeds[0].title, index)
+    runway_url = table['URL'] + "/slideshow/collection"
+    response = requests.get(runway_url)
+    soup = BeautifulSoup(response.content, "html.parser")
 
     #Delete message showing all options to avoid spamming buttons and overwhelming backend
     await reaction.message.delete()
 
-    #Send all urls from backend, one second wait between images to avoid rate limits
-    for item in table['Outfits']:
-      await reaction.message.channel.send(item)
+    #Gather data where all image urls in the collection are held and convert into json
+    results = soup.findAll("script", type="text/javascript", text=True)
+    parse = results[1].string
+    start = parse.index("runwayGalleries")
+    end = parse.index("isMobileDevice")
+
+    #Making usable json from parsed data to easily fetch each image url
+    parse = "{" + parse[start - 1:end - 2] + "}"
+    ans = json.loads(parse)
+    ans = ans["runwayGalleries"]["galleries"][0]["items"]
+    
+    for n in ans:
+      await reaction.message.channel.send(n["image"]["sources"]["xxl"]["url"])
       time.sleep(1)
-      
+
+    rating_embed = discord.Embed(title=str(reaction.message.embeds[0].title + "\n" + table["Collection Title"]), description="Did you enjoy this collection? React with 👍 if you liked the, and 👎 if you didn't.")
+    rating_embed.set_footer(text = "Runway #" + str(index+1))
+    rating_msg = await reaction.message.channel.send(embed=rating_embed)
+    for emoji in vote_emojis:
+      await rating_msg.add_reaction(emoji)
+
+  #Action relating to when a user wants to see the page after what is currently displayed in a designer's embed object
   if not user.bot and reaction.emoji == skip_button:
     embed = reaction.message.embeds[0]
     page_number = int(embed.footer.text.split()[1])
@@ -151,5 +179,21 @@ async def on_reaction_add(reaction, user):
       newEmbed.set_footer(text=footer_txt)
       await reaction.message.edit(embed=newEmbed)
     await reaction.remove(user=user)
+
+  #Action relating to when a user is prompted to upvote or downvote the runway they are currently viewing.
+  if not user.bot and reaction.emoji in vote_emojis:
+    #Grabbing collection information from backend in order to update information.
+    embed = reaction.message.embeds[0]
+    designer_name = embed.title.split("\n")[0]
+    index = int(embed.footer.text.split("#")[1]) - 1
+    table = getRunway(designer_name, index)
+    table['TotalVotes'] = table['TotalVotes'] + 1
+
+    #Only increment score when it's an upvote.
+    if (reaction.emoji == "👍"):
+      table['Score'] = table['Score'] + 1
+
+    #Must call backend and fix information in designer since user input changed a datafield.
+    updateRunway(designer_name, index, table)
     
 client.run(os.getenv('token'))
